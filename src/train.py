@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from dataset import get_dataloader
 from model import TransformerCaptionModel
+import os
 
 
 def train():
@@ -22,7 +23,7 @@ def train():
 
     model.train()
     for epoch in range(3):
-        total_loss = 0
+        total_loss = 0.0
 
         for features, captions in loader:
             features = features.to(device)
@@ -30,7 +31,6 @@ def train():
 
             optimizer.zero_grad()
 
-            # input captions (remove last token)
             input_caps = captions[:, :-1]
             target_caps = captions[:, 1:]
 
@@ -48,6 +48,19 @@ def train():
             total_loss += loss.item()
 
         print(f"Epoch {epoch+1} | Loss: {total_loss:.4f}")
+
+    # ✅ SAVE MODEL ONCE, AFTER TRAINING
+    os.makedirs("experiments", exist_ok=True)
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "word2idx": dataset.word2idx,
+            "idx2word": dataset.idx2word,
+        },
+        "experiments/baseline.pt",
+    )
+
+    print("Training finished. Model saved to experiments/baseline.pt")
 
 
 if __name__ == "__main__":
