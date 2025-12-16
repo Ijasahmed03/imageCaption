@@ -1,128 +1,159 @@
-# src/model.py
-
-import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import math
 
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
+# -------------------------------
+# Geometry computation
+# -------------------------------
+def compute_geometry_bias(boxes):
+    """
+    boxes: (B, N, 4) normalized [x1, y1, x2, y2]
+    returns: (B, N, N, 4)
+    """
+    B, N, _ = boxes.size()
+
+    x1, y1, x2, y2 = boxes.unbind(-1)
+    w = x2 - x1
+    h = y2 - y1
+    cx = (x1 + x2) / 2
+    cy = (y1 + y2) / 2
+
+    dx = cx.unsqueeze(2) - cx.unsqueeze(1)
+    dy = cy.unsqueeze(2) - cy.unsqueeze(1)
+
+    dx = dx / (w.unsqueeze(2) + 1e-6)
+    dy = dy / (h.unsqueeze(2) + 1e-6)
+
+    dw = torch.log((w.unsqueeze(2) + 1e-6) / (w.unsqueeze(1) + 1e-6))
+    dh = torch.log((h.unsqueeze(2) + 1e-6) / (h.unsqueeze(1) + 1e-6))
+
+    geom = torch.stack([dx, dy, dw, dh], dim=-1)
+    return geom
+
+
+# -------------------------------
+# Relation bias module
+# -------------------------------
+class RelationAwareBias(nn.Module):
+    def __init__(self, hidden_dim):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1).float()
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
+        self.linear = nn.Linear(4, hidden_dim)
 
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-
-        self.register_buffer("pe", pe)
-
-    def forward(self, x):
-        # x: (batch, seq_len, d_model)
-        return x + self.pe[:, : x.size(1)]
+    def forward(self, geom):
+        """
+        geom: (B, N, N, 4)
+        returns: (B, N, N)
+        """
+        bias = self.linear(geom)
+        return bias.mean(-1)
 
 
+# -------------------------------
+# Captioning Model
+# -------------------------------
 class TransformerCaptionModel(nn.Module):
     def __init__(
         self,
         vocab_size,
         feature_dim=2048,
-        d_model=512,
+        hidden_dim=512,
         num_heads=8,
-        num_encoder_layers=3,
-        num_decoder_layers=3,
+        num_layers=3,
         max_len=20,
-        dropout=0.1,
     ):
         super().__init__()
 
-        self.d_model = d_model
+        self.hidden_dim = hidden_dim
+        self.max_len = max_len
 
-        # project image features to transformer dimension
-        self.feature_proj = nn.Linear(feature_dim, d_model)
+        # Feature projection
+        self.feature_proj = nn.Linear(feature_dim, hidden_dim)
 
-        # word embedding
-        self.word_embedding = nn.Embedding(vocab_size, d_model)
+        # Geometry bias
+        self.relation_bias = RelationAwareBias(hidden_dim)
 
-        # positional encodings
-        self.pos_encoder = PositionalEncoding(d_model)
-        self.pos_decoder = PositionalEncoding(d_model)
-
-        # transformer
-        self.transformer = nn.Transformer(
-            d_model=d_model,
+        # Encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
             nhead=num_heads,
-            num_encoder_layers=num_encoder_layers,
-            num_decoder_layers=num_decoder_layers,
-            dropout=dropout,
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers,
         )
 
-        # output layer
-        self.output_layer = nn.Linear(d_model, vocab_size)
-
-    def forward(self, image_features, captions):
-        """
-        image_features: (batch, regions, 2048)
-        captions: (batch, seq_len)
-        """
-
-        # encode image features
-        img = self.feature_proj(image_features)
-        img = self.pos_encoder(img)
-        img = img.permute(1, 0, 2)  # (regions, batch, d_model)
-
-        # embed captions
-        cap = self.word_embedding(captions) * math.sqrt(self.d_model)
-        cap = self.pos_decoder(cap)
-        cap = cap.permute(1, 0, 2)  # (seq_len, batch, d_model)
-
-        # transformer forward
-        output = self.transformer(img, cap)
-
-        # project to vocab
-        output = output.permute(1, 0, 2)  # (batch, seq_len, d_model)
-        logits = self.output_layer(output)
-
-        return logits
-
-    @torch.no_grad()
-    def generate(self, image_features, sos_idx, eos_idx, max_len=20):
-        """
-        Greedy caption generation
-        image_features: (batch, regions, 2048)
-        """
-        self.eval()
-        device = image_features.device
-        batch_size = image_features.size(0)
-
-        # Encode image features
-        img = self.feature_proj(image_features)
-        img = self.pos_encoder(img)
-        img = img.permute(1, 0, 2)  # (regions, batch, d_model)
-
-        # Start with <SOS>
-        generated = torch.full(
-            (batch_size, 1), sos_idx, dtype=torch.long, device=device
+        # Decoder
+        self.embedding = nn.Embedding(vocab_size, hidden_dim)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=hidden_dim,
+            nhead=num_heads,
+            batch_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer,
+            num_layers=num_layers,
         )
 
-        for _ in range(max_len - 1):
-            cap = self.word_embedding(generated) * math.sqrt(self.d_model)
-            cap = self.pos_decoder(cap)
-            cap = cap.permute(1, 0, 2)  # (seq, batch, d_model)
+        self.fc_out = nn.Linear(hidden_dim, vocab_size)
 
-            out = self.transformer(img, cap)
-            out = out.permute(1, 0, 2)  # (batch, seq, d_model)
+    # ---------------------------
+    # Forward (training)
+    # ---------------------------
+    def forward(self, features, boxes, captions):
+        """
+        features: (B, N, 2048)
+        boxes:    (B, N, 4)
+        captions: (B, T)
+        """
 
-            logits = self.output_layer(out[:, -1])  # last token
-            next_token = logits.argmax(dim=-1, keepdim=True)
+        # Project features
+        feats = self.feature_proj(features)
 
-            generated = torch.cat([generated, next_token], dim=1)
+        # Geometry bias
+        geom = compute_geometry_bias(boxes)
+        geom_bias = self.relation_bias(geom)
+        geom_bias = geom_bias / math.sqrt(self.hidden_dim)
+        # Inject relation bias
+        feats = feats + 0.1*geom_bias.mean(dim=2).unsqueeze(-1)
 
-            # stop if all finished
+        # Encode
+        memory = self.encoder(feats)
+
+        # Decode
+        tgt = self.embedding(captions)
+        out = self.decoder(tgt, memory)
+
+        return self.fc_out(out)
+
+    # ---------------------------
+    # Inference
+    # ---------------------------
+    def generate(self, features, boxes, sos_idx, eos_idx):
+        B = features.size(0)
+        device = features.device
+
+        feats = self.feature_proj(features)
+
+        geom = compute_geometry_bias(boxes)
+        geom_bias = self.relation_bias(geom)
+        geom_bias = geom_bias / math.sqrt(self.hidden_dim)
+        feats = feats + 0.1*geom_bias.mean(dim=2).unsqueeze(-1)
+
+        memory = self.encoder(feats)
+
+        outputs = torch.full((B, 1), sos_idx, dtype=torch.long, device=device)
+
+        for _ in range(self.max_len):
+            tgt = self.embedding(outputs)
+            out = self.decoder(tgt, memory)
+            logits = self.fc_out(out[:, -1])
+            next_token = logits.argmax(-1, keepdim=True)
+            outputs = torch.cat([outputs, next_token], dim=1)
+
             if (next_token == eos_idx).all():
                 break
 
-        return generated
+        return outputs
