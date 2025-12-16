@@ -1,2 +1,4 @@
-experiments/
 *.pt
+experiments/
+__pycache__/
+.env
