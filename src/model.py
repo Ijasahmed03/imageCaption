@@ -131,7 +131,7 @@ class TransformerCaptionModel(nn.Module):
     # ---------------------------
     # Inference
     # ---------------------------
-    def generate(self, features, boxes, sos_idx, eos_idx):
+    def generate(self, features, boxes, sos_idx, eos_idx, min_len=5):
         B = features.size(0)
         device = features.device
 
@@ -140,20 +140,29 @@ class TransformerCaptionModel(nn.Module):
         geom = compute_geometry_bias(boxes)
         geom_bias = self.relation_bias(geom)
         geom_bias = geom_bias / math.sqrt(self.hidden_dim)
-        feats = feats + 0.1*geom_bias.mean(dim=2).unsqueeze(-1)
+        feats = feats + 0.1 * geom_bias.mean(dim=2).unsqueeze(-1)
 
         memory = self.encoder(feats)
 
         outputs = torch.full((B, 1), sos_idx, dtype=torch.long, device=device)
 
-        for _ in range(self.max_len):
+        for step in range(self.max_len):
             tgt = self.embedding(outputs)
             out = self.decoder(tgt, memory)
             logits = self.fc_out(out[:, -1])
+
+            # 🚫 block PAD always
+            pad_idx = 0
+            logits[:, pad_idx] = -1e9
+            logits[:, sos_idx] = -1e9
+            # 🚫 block EOS for first few steps
+            if step < min_len:
+                logits[:, eos_idx] = -1e9
+
             next_token = logits.argmax(-1, keepdim=True)
             outputs = torch.cat([outputs, next_token], dim=1)
 
-            if (next_token == eos_idx).all():
+            if step >= min_len and (next_token == eos_idx).all():
                 break
 
         return outputs
