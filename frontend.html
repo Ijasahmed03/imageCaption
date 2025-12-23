@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Image Captioning System</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f5f5f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .card {
+            background: white;
+            padding: 20px;
+            width: 350px;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+
+        img {
+            max-width: 100%;
+            margin-top: 10px;
+            display: none;
+        }
+
+        button {
+            margin-top: 15px;
+            padding: 10px;
+            width: 100%;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        #caption {
+            margin-top: 15px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="card">
+        <h2>Image Captioning</h2>
+
+        <input type="file" id="imageInput" accept="image/*">
+        <img id="preview">
+
+        <button onclick="uploadImage()">Generate Caption</button>
+
+        <p id="caption"></p>
+    </div>
+
+    <script>
+        const preview = document.getElementById("preview");
+        const caption = document.getElementById("caption");
+
+        document.getElementById("imageInput").onchange = function (event) {
+            const file = event.target.files[0];
+            if (file) {
+                preview.src = URL.createObjectURL(file);
+                preview.style.display = "block";
+            }
+        };
+
+        async function uploadImage() {
+            const fileInput = document.getElementById("imageInput");
+            if (!fileInput.files.length) {
+                alert("Please select an image first");
+                return;
+            }
+
+            caption.innerText = "Generating caption...";
+
+            const formData = new FormData();
+            formData.append("file", fileInput.files[0]);
+
+            const response = await fetch("http://127.0.0.1:8000/caption", {
+                method: "POST",
+                body: formData
+            });
+
+            const data = await response.json();
+            caption.innerText = data.caption || "No caption generated";
+        }
+    </script>
+
+</body>
+
+</html>
